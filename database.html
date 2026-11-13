@@ -445,7 +445,7 @@
             let likeButton = article.querySelector(".like");
             likeButton.onclick = () => like(record_id);
             skapi.getRecords({
-                table: "likes",
+                table: { name: "likes", access_group: "public" },
                 index: { name: "$user_id", value: me.user_id },
                 reference: record_id,
             }).then((myLike) => {
@@ -578,7 +578,7 @@
                     delete likeId[record_id];
                     likeCount.textContent = Number(likeCount.textContent) - 1;
                 } else {
-                    let record = await skapi.postRecord(null, { table: "likes", reference: record_id });
+                    let record = await skapi.postRecord(null, { table: { name: "likes", access_group: "public" }, reference: record_id });
                     likeId[record_id] = record.record_id;
                     likeCount.textContent = Number(likeCount.textContent) + 1;
                 }
