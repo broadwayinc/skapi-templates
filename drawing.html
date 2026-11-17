@@ -23,8 +23,9 @@
     <main>
         <h1>Shared Drawing</h1>
         <p>
-            Two users draw on one canvas. Every stroke is sent over a WebRTC data channel, straight from one browser
-            to the other, and drawn on the other side as it happens. No video is involved: a stroke is a few numbers,
+            Two users draw on one canvas. Every stroke is sent over a WebRTC data channel, directly between the two
+            browsers when their networks allow it and through Skapi's relay server when they do not, and drawn on the
+            other side as it happens. No video is involved: a stroke is a few numbers,
             so this costs almost no bandwidth and both sides can draw at once.
         </p>
         <p>
@@ -108,8 +109,12 @@
         let receiver = null; // The incoming invitation, the rtc:incoming realtime message
         let rtcConnection = null; // The established connection
         let channel = null; // The "drawing" data channel, once open
+        let inviting = false; // true while connectRTC() is sending an invitation
+        let accepting = false; // true while an invitation is being accepted
+        let online = true; // false while the realtime connection is down and being reopened by the SDK
         let participants = {}; // user_id: profile
         let cidList = {}; // connection id: user_id
+        let leftCids = new Set(); // connections that left, so a row still being added for one is dropped
         let myName = "You";
         let peerName = "Them";
 
@@ -158,14 +163,16 @@
             }
         }
 
+        // One pen: a second finger on a touch screen is ignored, so two strokes are never joined into one.
         board.addEventListener("pointerdown", (event) => {
+            if (!event.isPrimary) return;
             penDown = true;
             last = position(event);
             try { board.setPointerCapture(event.pointerId); } catch (err) { }
         });
 
         board.addEventListener("pointermove", (event) => {
-            if (!penDown) return;
+            if (!penDown || !event.isPrimary) return;
             let point = position(event);
             drawSegment(last, point, color, 3);
             send({ type: "segment", from: last, to: point, color, width: 3 });
@@ -173,7 +180,8 @@
         });
 
         for (let name of ["pointerup", "pointercancel"]) {
-            board.addEventListener(name, () => {
+            board.addEventListener(name, (event) => {
+                if (!event.isPrimary) return;
                 penDown = false;
                 last = null;
             });
@@ -205,16 +213,10 @@
             return p;
         }
 
-        /*
-            A new line must not land outside the visible part of a scrolling log. The newest line is the first
-            in the log; it is at the top in the page layout and at the bottom in fullscreen (column-reverse),
-            so scroll to whichever end holds it.
-        */
+        // A new line must not land outside the visible part of a scrolling log: the newest line is at the top.
         function revealNewest() {
             let log = document.getElementById("chatLog");
-            if (log.scrollHeight <= log.clientHeight) return;
-            let reversed = getComputedStyle(log).flexDirection === "column-reverse";
-            log.scrollTop = reversed ? log.scrollHeight : 0;
+            if (log.scrollHeight > log.clientHeight) log.scrollTop = 0;
         }
 
         function sendChat(event) {
@@ -335,17 +337,27 @@
             `meta` tells the other side what this is.
         */
         async function invite(cid) {
-            if (call || rtcConnection || receiver) {
+            // inviting is set before the first await, so a double click cannot send a second invitation.
+            if (inviting || call || rtcConnection || receiver) {
                 alert("A drawing session is already active.");
                 return;
             }
+            inviting = true;
 
             peerName = displayName(participants[cidList[cid]]);
-            call = await skapi.connectRTC({
-                cid,
-                channels: [{ protocol: "drawing", ordered: true }, "text-chat"],
-                meta: { kind: "drawing" },
-            }, RTCCallback);
+            try {
+                call = await skapi.connectRTC({
+                    cid,
+                    channels: [{ protocol: "drawing", ordered: true }, "text-chat"],
+                    meta: { kind: "drawing" },
+                }, RTCCallback);
+            } catch (err) {
+                // Close whatever was opened for this connection id before the invitation failed.
+                skapi.closeRTC({ cid }).catch(() => { });
+                throw err;
+            } finally {
+                inviting = false;
+            }
 
             document.getElementById("drawingWith").textContent = peerName;
             let dialog = document.getElementById("el_dl_calling");
@@ -357,23 +369,46 @@
         }
 
         async function acceptInvitation() {
-            if (!receiver) {
+            // accepting guards against a second click while the first one is still connecting.
+            if (!receiver || accepting) {
                 return;
             }
+            accepting = true;
             try {
                 // The channels come from the inviter; this side sends nothing of its own.
                 rtcConnection = await receiver.connectRTC({}, RTCCallback);
                 document.getElementById("el_dl_incoming").close();
+                if (!rtcConnection) {
+                    // connectRTC() resolves to null when the inviter cancelled in the meantime.
+                    receiver = null;
+                    alert(`${peerName} cancelled the invitation.`);
+                }
             } catch (err) {
                 alert(err.message);
+            } finally {
+                accepting = false;
             }
         }
 
         function rejectInvitation() {
+            if (accepting) {
+                return;
+            }
             receiver?.hangup?.();
             document.getElementById("el_dl_incoming").close();
             receiver = null;
         }
+
+        // Escape closes a dialog on its own; here it cancels the invitation or rejects the incoming one,
+        // so an invitation never stays open without its dialog.
+        document.getElementById("el_dl_calling").addEventListener("cancel", (event) => {
+            event.preventDefault();
+            leaveDrawing();
+        });
+        document.getElementById("el_dl_incoming").addEventListener("cancel", (event) => {
+            event.preventDefault();
+            rejectInvitation();
+        });
 
         /*
             The list of users who can be invited: everyone else in the realtime group.
@@ -406,7 +441,8 @@
                     console.error(err);
                 }
             }
-            if (!user) {
+            // The connection may have left while the profile was being fetched.
+            if (!user || leftCids.has(cid)) {
                 return;
             }
             participants[user_id] = user;
@@ -443,8 +479,9 @@
 
             if (rt.type === "notice") {
                 if (["USER_LEFT", "USER_DISCONNECTED"].includes(rt.code)) {
+                    // One row per connection: the same user may still be online in another tab.
+                    leftCids.add(rt.sender_cid);
                     document.getElementById("el_tr_participant-" + rt.sender_cid)?.remove();
-                    delete participants[rt.sender];
                     delete cidList[rt.sender_cid];
                     if (!hasParticipantRows()) {
                         showParticipantMessage("No other user is online.");
@@ -460,8 +497,29 @@
                 receiver = null;
             }
 
+            if (rt.type === "reconnect") {
+                // The realtime connection dropped. The SDK reopens it and joins the group again by itself.
+                online = false;
+            }
+
+            if (rt.type === "success" && !online) {
+                /*
+                    The realtime connection is open again. Users may have come and gone meanwhile, and
+                    connection ids change on a reconnect, so the list is read again.
+                */
+                online = true;
+                cidList = {};
+                showParticipantMessage("Loading...");
+                getRealtimeUsers().catch((err) => console.error(err));
+            }
+
             if (rt.type === "rtc:incoming") {
-                // An invitation. rt.meta.kind says what it is; rt.sources tells whether the inviter sends voice.
+                // An invitation. rt.meta.kind says what it is; rt.sources lists what the inviter sends (nothing here).
+                if (inviting || call || rtcConnection || receiver || rt.meta?.kind !== "drawing") {
+                    // Already drawing or inviting someone, or not a drawing invitation: refuse it.
+                    rt.hangup();
+                    return;
+                }
                 receiver = rt;
                 peerName = displayName(participants[rt.sender]);
                 document.getElementById("drawingWith").textContent = peerName;

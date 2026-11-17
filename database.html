@@ -29,10 +29,10 @@
         </p>
         <ul>
             <li>Posts are uploaded with <code>skapi.postRecord()</code> and fetched with <code>skapi.getRecords()</code>, four at a time.</li>
-            <li>A private post is uploaded to the access group <code>private</code>, so only its uploader can read it.</li>
+            <li>A private post is uploaded to the access group <code>private</code>, so only its uploader can read it. It has no likes or comments, since those are records other users could read.</li>
             <li>A like is a record in the table <code>likes</code> that references the post. The reference count of a post is its number of likes.</li>
             <li>A comment is a record in the table <code>comments</code> with the compound index name <code>comment.&lt;record_id&gt;</code>, which is also what "Most commented" is ordered by.</li>
-            <li>Subscribing to an uploader adds their posts to your feed, fetched with <code>skapi.getFeed()</code>.</li>
+            <li>Subscribing to an uploader adds the posts they upload from then on to your feed, fetched with <code>skapi.getFeed()</code>.</li>
         </ul>
 
         <!-- This page needs a logged in user (see LOGIN_REQUIRED in service.js). -->
@@ -54,7 +54,8 @@
                     <input type="text" id="input_tags" placeholder="tag1, tag2, ...">
                 </label>
                 <label>
-                    <input type="checkbox" id="input_private" name="private" value="private">
+                    <!-- No name attribute: the box is read by its id, and is not saved into the record's data. -->
+                    <input type="checkbox" id="input_private">
                     Private post (only you can see it)
                 </label>
                 <button type="submit" id="postButton">Post</button>
@@ -132,14 +133,19 @@
             disableForm(form, true);
             postButton.textContent = "0%";
 
+            let isPrivate = document.getElementById("input_private").checked;
+            // "tag1, tag2," becomes ["tag1", "tag2"]: an empty tag would make postRecord() refuse the whole post.
+            let tags = document.getElementById("input_tags").value.split(",").map((t) => t.trim()).filter(Boolean);
+
             let params = {
                 table: {
                     name: "posts",
                     // A private post can only be read by its uploader. Other posts can be read by any logged in user.
-                    access_group: document.getElementById("input_private").checked ? "private" : "authorized",
+                    access_group: isPrivate ? "private" : "authorized",
                     subscription: {
                         is_subscription_record: false, // The posts stay queryable together with everyone else's posts.
-                        upload_to_feed: true, // The post also goes to the feed of the users subscribed to the uploader.
+                        // The post also goes to the feed of the users subscribed to the uploader; a private post does not.
+                        upload_to_feed: !isPrivate,
                     },
                 },
                 source: {
@@ -151,15 +157,12 @@
                         postButton.textContent = `${Math.floor(p.progress)}%`;
                     }
                 },
-                tags: document.getElementById("input_tags").value || null,
+                tags: tags.length ? tags : null,
             };
 
-            skapi.postRecord(event, params).then(async (record) => {
-                // Put the new post at the top of the list.
-                if (!section_posts.querySelector("article")) {
-                    section_posts.replaceChildren();
-                }
-                section_posts.prepend(await createArticleContent(record));
+            skapi.postRecord(event, params).then(() => {
+                // Fetch the view that is showing again, so the new post appears only where it belongs.
+                initialFetch();
 
                 form.reset();
                 img_preview.hidden = true;
@@ -214,9 +217,16 @@
 
         function getSubscriptionStatus(user_id) {
             if (!subscription_list[user_id]) {
-                subscription_list[user_id] = userReady
+                let request = userReady
                     .then((me) => skapi.getSubscriptions({ subscriber: me.user_id, subscription: user_id }))
                     .then((res) => res.list[0] || false);
+                subscription_list[user_id] = request;
+                // A failed lookup is not kept, so the next click tries again.
+                request.catch(() => {
+                    if (subscription_list[user_id] === request) {
+                        delete subscription_list[user_id];
+                    }
+                });
             }
             return subscription_list[user_id];
         }
@@ -227,17 +237,36 @@
             section_posts.replaceChildren(p);
         }
 
+        /*
+            Show fetched posts. Returns false, and changes nothing, when a newer fetch has started meanwhile
+            (the user switched views while this one was loading), so an old fetch never replaces a newer view.
+        */
         function showPosts(articles, fetchMore, requestGeneration) {
+            if (requestGeneration !== fetchGeneration) {
+                return false;
+            }
             if (!fetchMore) {
                 section_posts.replaceChildren();
             }
-            for (let article of articles) {
-                if (article && requestGeneration === fetchGeneration) {
-                    section_posts.appendChild(article);
-                }
+            let found = articles.filter(Boolean);
+            if (found.length) {
+                section_posts.querySelector(":scope > p")?.remove(); // "No posts found." from an earlier batch
+                section_posts.append(...found);
             }
             if (!section_posts.querySelector("article")) {
                 showEmptyMessage("No posts found.");
+            }
+            return true;
+        }
+
+        // A failed first fetch replaces the list with the error; a failed "Fetch more" keeps the posts shown.
+        function showFetchError(err, fetchMore, retry) {
+            if (fetchMore && section_posts.querySelector("article")) {
+                alert(`Unable to load more posts: ${err.message}`);
+                fetchMoreButton.disabled = false;
+                fetchMoreButton.onclick = retry;
+            } else {
+                showEmptyMessage(`Unable to load posts: ${err.message}`);
             }
         }
 
@@ -256,7 +285,7 @@
             } catch (err) {
                 console.error(err);
                 if (requestGeneration === fetchGeneration) {
-                    showEmptyMessage(`Unable to load posts: ${err.message}`);
+                    showFetchError(err, fetchMore, () => getPosts());
                 }
                 return;
             }
@@ -266,7 +295,9 @@
             }
 
             let articles = await Promise.all(posts.list.map((p) => createArticleContent(p)));
-            showPosts(articles, fetchMore, requestGeneration);
+            if (!showPosts(articles, fetchMore, requestGeneration)) {
+                return;
+            }
 
             // endOfList is true when there is nothing more to fetch.
             fetchMoreButton.disabled = posts.endOfList;
@@ -286,7 +317,7 @@
             } catch (err) {
                 console.error(err);
                 if (requestGeneration === fetchGeneration) {
-                    showEmptyMessage(`Unable to load feed: ${err.message}`);
+                    showFetchError(err, fetchMore, () => getFeed());
                 }
                 return;
             }
@@ -296,7 +327,9 @@
             }
 
             let articles = await Promise.all(posts.list.map((p) => createArticleContent(p)));
-            showPosts(articles, fetchMore, requestGeneration);
+            if (!showPosts(articles, fetchMore, requestGeneration)) {
+                return;
+            }
 
             fetchMoreButton.disabled = posts.endOfList;
             fetchMoreButton.onclick = () => getFeed();
@@ -320,7 +353,7 @@
             } catch (err) {
                 console.error(err);
                 if (requestGeneration === fetchGeneration) {
-                    showEmptyMessage(`Unable to load posts: ${err.message}`);
+                    showFetchError(err, fetchMore, () => getMostCommentedPost());
                 }
                 return;
             }
@@ -329,6 +362,7 @@
                 return;
             }
 
+            // A post that was deleted keeps its comments' index, so its getRecords() finds nothing (null).
             let posts = await Promise.all(commentIndex.list.map((i) =>
                 skapi.getRecords({ record_id: i.index.slice("comment.".length) })
                     .then((res) => res.list[0])
@@ -338,10 +372,17 @@
                     })
             ));
             let articles = await Promise.all(posts.map((p) => p ? createArticleContent(p) : null));
-            showPosts(articles, fetchMore, requestGeneration);
+            if (!showPosts(articles, fetchMore, requestGeneration)) {
+                return;
+            }
 
             fetchMoreButton.disabled = commentIndex.endOfList;
             fetchMoreButton.onclick = () => getMostCommentedPost();
+
+            // Every post of this batch was deleted: fetch the next batch right away instead of showing nothing.
+            if (!articles.some(Boolean) && !commentIndex.endOfList) {
+                return getMostCommentedPost(true);
+            }
         }
 
         /*
@@ -441,6 +482,16 @@
                 }).catch((err) => console.error(err));
             }
 
+            /*
+                A private post has no likes or comments: a like is a public record and a comment an authorized one,
+                so other users could read them, and every user can list the index names (comment.<record_id>).
+            */
+            if (p.table?.access_group === "private") {
+                article.querySelector(".like").parentElement.hidden = true;
+                article.querySelector("section").hidden = true;
+                return article;
+            }
+
             // Like button. Enabled once we know whether the user has liked this post already.
             let likeButton = article.querySelector(".like");
             likeButton.onclick = () => like(record_id);
@@ -453,8 +504,12 @@
                     likeId[record_id] = myLike.list[0].record_id;
                 }
                 likeButton.textContent = likeId[record_id] ? "Unlike" : "Like";
+            }).catch((err) => {
+                // The button still works: the post's prevent_multiple_referencing refuses a second like.
+                console.error(err);
+            }).finally(() => {
                 likeButton.disabled = false;
-            }).catch((err) => console.error(err));
+            });
 
             // Comments
             article.querySelector("form").onsubmit = (event) => addComment(event, record_id);
@@ -593,12 +648,16 @@
 
         /*
             Subscribe to an uploader with skapi.subscribe(), or unsubscribe with skapi.unsubscribe().
-            With get_feed the uploader's posts appear in the user's feed.
+            With get_feed the posts the uploader uploads from then on appear in the user's feed.
         */
         function updateSubscribeButtons(user_id) {
-            subscription_list[user_id].then((subscribed) => {
-                for (let button of document.querySelectorAll(`button.subscribe[data-user-id="${user_id}"]`)) {
+            let buttons = document.querySelectorAll(`button.subscribe[data-user-id="${CSS.escape(user_id)}"]`);
+            getSubscriptionStatus(user_id).then((subscribed) => {
+                for (let button of buttons) {
                     button.textContent = subscribed ? "Unsubscribe" : "Subscribe";
+                }
+            }).catch((err) => console.error(err)).finally(() => {
+                for (let button of buttons) {
                     button.disabled = pendingSubscriptions.has(user_id);
                 }
             });
