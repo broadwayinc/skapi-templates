@@ -43,6 +43,18 @@
         <p>
             <a href="signup.html">Don't have an account?</a> | <a href="forgot-password.html">Forgot password?</a>
         </p>
+
+        <hr>
+
+        <p>
+            <code>skapi.anonymousLogin()</code> signs the visitor in without an account of their own.
+            It creates a temporary account with no email address and no password, which is deleted 30 minutes after
+            the visitor leaves, or at once on logout. The project owner turns this on with
+            <strong>Anonymous Login</strong> in the project settings.
+        </p>
+        <p>
+            <button type="button" id="guestLoginButton" onclick="guestLogin()">Continue as a guest</button>
+        </p>
     </main>
 
     <script>
@@ -87,6 +99,30 @@
                     return;
                 }
                 alert(err.message);
+            }
+        }
+
+        /*
+            A guest account cannot edit its profile, change a password, verify an email address or remove itself,
+            so a guest who was sent here from one of those pages goes to the account page instead.
+        */
+        const NOT_FOR_GUESTS = ["update-profile.html", "change-password.html", "email-verification.html", "remove-account.html"];
+
+        async function guestLogin() {
+            let button = document.getElementById("guestLoginButton");
+            button.disabled = true;
+            try {
+                await skapi.anonymousLogin();
+                let page = destination.split("#")[0];
+                location.replace(pageUrl(NOT_FOR_GUESTS.includes(page) ? "account.html" : destination));
+            } catch (err) {
+                /*
+                    err.message tells why, for example
+                    "Anonymous login is not enabled for this project." when the project owner has not turned it on,
+                    or "User limit exceeded." when the project is at its plan's user limit.
+                */
+                alert(err.message);
+                button.disabled = false;
             }
         }
     </script>
