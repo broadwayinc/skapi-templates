@@ -122,16 +122,15 @@
         }
 
         /*
-            A guest goes where a login would go, except to the pages a guest cannot use
-            (NOT_FOR_GUESTS in service.js): from those, to the account page instead.
+            A guest goes where a login would go. A page a guest cannot use (NOT_FOR_GUESTS in service.js)
+            sends the guest on to the account page by itself.
         */
         async function guestLogin() {
             let button = document.getElementById("guestLoginButton");
             button.disabled = true;
             try {
                 await skapi.anonymousLogin();
-                let page = destination.split("#")[0];
-                location.replace(pageUrl(NOT_FOR_GUESTS.includes(page) ? "account.html" : destination));
+                location.replace(pageUrl(destination));
             } catch (err) {
                 /*
                     err.message tells why, for example
