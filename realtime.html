@@ -107,8 +107,15 @@
         let joinGeneration = 0;
         let sendTo = null;
 
-        // Profiles of the users in the group, fetched once per user.
+        /*
+            The users in the group: user_id -> a promise of the user's profile.
+            The promise is kept rather than the profile, so a user is fetched and listed only once
+            even when several of their messages, or a notice and the first user list, arrive at the same time.
+        */
         let participants = {};
+
+        // False while the realtime connection is down and being reopened by the SDK.
+        let online = true;
 
         const chatMessages = document.getElementById("chatMessages");
         const participantList = document.getElementById("participants");
@@ -126,17 +133,23 @@
             return user?.name || user?.email || "User";
         }
 
-        // A line in the chat: "<name>: <text>", or a notice such as "<name> joined".
+        /*
+            A line in the chat: "<name>: <text>", or a notice such as "<name> joined the group.".
+            `user` is a profile or a promise of one. The line is added right away, so lines stay in the order
+            the messages arrived, and the name is filled in once the profile is known.
+        */
         function appendChatMessage(user, text, isNotice = false) {
             let p = document.createElement("p");
+            let name = document.createElement(isNotice ? "span" : "strong");
             if (isNotice) {
                 p.className = "notice";
-                p.textContent = text;
+                p.append(name, " " + text);
             } else {
-                let name = document.createElement("strong");
-                name.textContent = displayName(user) + ": ";
                 p.append(name, text);
             }
+            Promise.resolve(user).then((profile) => {
+                name.textContent = displayName(profile) + (isNotice ? "" : ": ");
+            });
             chatMessages.appendChild(p);
             chatMessages.scrollTop = chatMessages.scrollHeight;
             // On a phone the page is a column; keep its end, with the message input, in view as messages come in.
@@ -168,27 +181,38 @@
             Fetch a user's profile with skapi.getUsers() and add the user to the participant list.
             Other users are shown as a button that opens the private message dialog.
         */
-        async function getUserInfo(user_id) {
-            if (participants[user_id]) {
-                return participants[user_id];
+        function getUserInfo(user_id) {
+            if (!participants[user_id]) {
+                let request = fetchUser(user_id).then((user) => {
+                    // Only list the user if they are still in this group (they may have left, or the group changed).
+                    if (participants[user_id] === request) {
+                        if (user) {
+                            addParticipant(user);
+                        } else {
+                            delete participants[user_id]; // try again next time
+                        }
+                    }
+                    return user;
+                });
+                participants[user_id] = request;
             }
+            return participants[user_id];
+        }
 
-            let user;
+        async function fetchUser(user_id) {
             if (user_id === currentUser.user_id) {
-                user = currentUser;
-            } else {
-                try {
-                    user = (await skapi.getUsers({ searchFor: "user_id", value: user_id })).list?.[0];
-                } catch (err) {
-                    console.error(err);
-                }
+                return currentUser;
             }
-            if (!user) {
+            try {
+                return (await skapi.getUsers({ searchFor: "user_id", value: user_id })).list?.[0] || null;
+            } catch (err) {
+                console.error(err);
                 return null;
             }
+        }
 
-            participants[user_id] = user;
-
+        function addParticipant(user) {
+            let user_id = user.user_id;
             let li = document.createElement("li");
             li.id = "participant-" + user_id;
             if (user_id === currentUser.user_id) {
@@ -205,7 +229,19 @@
                 li.appendChild(button);
             }
             participantList.appendChild(li);
-            return user;
+        }
+
+        // Lists who is in the current group now, replacing the list shown.
+        async function loadParticipants() {
+            let requestGeneration = joinGeneration;
+            let users = await skapi.getRealtimeUsers({ group: currentGroup });
+            if (requestGeneration !== joinGeneration) {
+                return;
+            }
+            participants = {};
+            participantList.replaceChildren();
+            // A user with the page open twice is in the list once per connection; getUserInfo() lists them once.
+            await Promise.all(users.list.map((member) => getUserInfo(member.user_id)));
         }
 
         /*
@@ -220,15 +256,22 @@
             }
 
             if (rt.type === "message") {
-                // A message posted to the group. rt.message holds the form data that was sent.
-                let user = await getUserInfo(rt.sender);
-                appendChatMessage(user, rt.message?.chatmsg || "");
+                /*
+                    A message posted to the group. rt.message holds the form data that was sent.
+                    rt.sender_rid is the group it was posted to: a message from the group the user just left
+                    can still arrive right after switching groups, and is not shown in the new one.
+                */
+                if (rt.sender_rid && rt.sender_rid !== currentGroup) {
+                    return;
+                }
+                appendChatMessage(getUserInfo(rt.sender), rt.message?.chatmsg || "");
             } else if (rt.type === "private") {
                 // A message posted to this user.
                 if (rt.sender === currentUser.user_id) {
                     return;
                 }
-                let user = await getUserInfo(rt.sender);
+                // The sender may not be in this group, so their profile is fetched without adding them to the list.
+                let user = await (participants[rt.sender] || fetchUser(rt.sender));
                 document.getElementById("privateMsgFrom").textContent = displayName(user);
                 document.getElementById("privateMsg").textContent = rt.message?.msg || "";
                 let dialog = document.getElementById("privateMsgDialog");
@@ -236,15 +279,35 @@
                     dialog.showModal();
                 }
             } else if (rt.type === "notice") {
-                // Users joining and leaving the group.
-                if (["USER_LEFT", "USER_DISCONNECTED"].includes(rt.code)) {
+                /*
+                    Users joining and leaving the group.
+                    A user who disconnects sends two notices, USER_DISCONNECTED and then USER_LEFT,
+                    so only USER_LEFT is shown.
+                */
+                if (rt.sender_rid && rt.sender_rid !== currentGroup) {
+                    return;
+                }
+                if (rt.code === "USER_LEFT") {
                     let user = participants[rt.sender];
                     document.getElementById("participant-" + rt.sender)?.remove();
                     delete participants[rt.sender];
-                    appendChatMessage(null, `${displayName(user)} left the group.`, true);
+                    appendChatMessage(user, "left the group.", true);
                 } else if (rt.code === "USER_JOINED") {
-                    let user = await getUserInfo(rt.sender);
-                    appendChatMessage(null, `${displayName(user)} joined the group.`, true);
+                    appendChatMessage(getUserInfo(rt.sender), "joined the group.", true);
+                }
+            } else if (rt.type === "reconnect") {
+                // The connection dropped. The SDK reopens it and joins the group again by itself.
+                online = false;
+            } else if (rt.type === "success") {
+                /*
+                    The connection is open: the first time, and again after a drop.
+                    Users may have joined or left while it was down, so the list is read again.
+                */
+                if (!online) {
+                    online = true;
+                    if (currentGroup) {
+                        loadParticipants().catch((err) => console.error(err));
+                    }
                 }
             } else if (rt.type === "error") {
                 console.error(rt.message);
@@ -266,8 +329,7 @@
         });
 
         /*
-            List the groups with skapi.getRealtimeGroups().
-            A group exists as long as someone is in it.
+            List the groups with skapi.getRealtimeGroups(), with the number of users in each.
         */
         async function listGroups() {
             let tbody = document.getElementById("RealtimeGroups");
@@ -304,6 +366,14 @@
             event.preventDefault();
             let groupName = event.target.elements.value.value.trim();
             if (!groupName) {
+                return;
+            }
+            /*
+                skapi.postRealtime() reads a recipient shaped like a user id as a user, not a group,
+                so a group with such a name could never receive a message.
+            */
+            if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(groupName)) {
+                alert("A group name cannot have the form of a user id.");
                 return;
             }
 
@@ -390,12 +460,11 @@
 
             try {
                 await skapi.joinRealtime({ group: currentGroup });
-                // List who is in the group already.
-                let users = await skapi.getRealtimeUsers({ group: currentGroup });
                 if (requestGeneration !== joinGeneration) {
                     return;
                 }
-                await Promise.all(users.list.map((member) => getUserInfo(member.user_id)));
+                // List who is in the group already.
+                await loadParticipants();
             } catch (err) {
                 if (requestGeneration === joinGeneration) {
                     alert(err.message);

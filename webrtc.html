@@ -23,15 +23,16 @@
     <main>
         <h1>RTC Video Chat</h1>
         <p>
-            A video call between two users, straight from one browser to the other. <code>skapi.connectRTC()</code>
+            A video call between two users, directly between the two browsers when their networks allow it and
+            through Skapi's relay server when they do not. <code>skapi.connectRTC()</code>
             calls the other user with the camera and the microphone, the callee gets an <code>rtc:incoming</code>
-            message and answers with <code>connectRTC()</code> on it, and Skapi only carries the signaling. The screen,
+            message and answers with <code>connectRTC()</code> on it, and Skapi carries the signaling. The screen,
             text messages and files travel over the same connection.
         </p>
         <p>
             Allow the camera and the microphone when the browser asks. WebRTC works over HTTPS or on
-            <code>localhost</code>. Open this page in another browser or device with a second account: both users
-            appear in the list below. Click a video during the call to go fullscreen; Escape or the Back button
+            <code>localhost</code>. Open this page in another browser or device with a second account: each of you
+            sees the other in the list below. Click a video during the call to go fullscreen; Escape or the Back button
             leaves it.
         </p>
 
@@ -124,6 +125,10 @@
         let call = null; // The outgoing call, returned by skapi.connectRTC()
         let receiver = null; // The incoming call, the rtc:incoming realtime message
         let rtcConnection = null; // The established connection
+        let placingCall = false; // true while connectRTC() is getting the camera and ringing the other user
+        let accepting = false; // true while an incoming call is being accepted
+        let fileUrls = []; // object URLs of the received files, released when the call ends
+        let online = true; // false while the realtime connection is down and being reopened by the SDK
         let participants = {}; // user_id: profile
         let cidList = {}; // connection id: user_id
         let myName = "You";
@@ -290,7 +295,8 @@
         // The receiving side: a fileprogress event per chunk of progress, then a file event with the File.
         function fileLine(e) {
             let log = document.getElementById("chatLog");
-            let line = log.querySelector(`[data-file="${e.id}"]`);
+            // The id comes from the other browser, so it is escaped before it goes into a selector.
+            let line = log.querySelector(`[data-file="${CSS.escape(String(e.id))}"]`);
             if (!line) {
                 line = addChatLine(peerName, `${e.name} (${formatSize(e.size)}) `);
                 line.dataset.file = e.id;
@@ -309,7 +315,9 @@
         function fileReceived(e) {
             let line = fileLine(e);
             let link = document.createElement("a");
+            // The file stays in memory until its object URL is released, which happens when the call ends.
             link.href = URL.createObjectURL(e.file);
+            fileUrls.push(link.href);
             link.download = e.name;
             link.textContent = "Download";
             let progress = line.querySelector("progress");
@@ -365,6 +373,8 @@
                         videoCall.hidden = true;
                         callList.hidden = false;
                         document.getElementById("chatLog").replaceChildren();
+                        for (let url of fileUrls) URL.revokeObjectURL(url);
+                        fileUrls = [];
                         for (let view of VIEWS) hideTile(view);
                         document.getElementById("btn_mic").textContent = "Mute microphone";
                         document.getElementById("btn_camera").textContent = "Turn camera off";
@@ -378,6 +388,11 @@
                     }
                     break;
                 }
+
+                case "ringtimeout":
+                    // Nobody answered within ringTimeout (see callRTC). The call closes right after this.
+                    setTimeout(() => alert(`${peerName} did not answer.`), 0);
+                    break;
 
                 case "reconnecting":
                     // The connection dropped. The call stays open while the SDK restarts it, for up to 15 seconds.
@@ -574,13 +589,25 @@
             A rejection shows up as a connectionstatechange event in RTCCallback.
         */
         async function callRTC(cid) {
-            if (call || rtcConnection || receiver) {
+            // placingCall is set before the first await, so a double click cannot start a second call.
+            if (placingCall || call || rtcConnection || receiver) {
                 alert("A call is already active.");
                 return;
             }
+            placingCall = true;
 
             setPeer(participants[cidList[cid]]);
-            call = await skapi.connectRTC({ cid, media: { audio: true, video: true }, meta: { kind: "video call" } }, RTCCallback);
+            try {
+                // ringTimeout: stop ringing after 30 seconds without an answer (the "ringtimeout" event).
+                call = await skapi.connectRTC({ cid, media: { audio: true, video: true }, meta: { kind: "video call" }, ringTimeout: 30000 }, RTCCallback);
+            } catch (err) {
+                // The camera may already be on when the call fails (for example the realtime connection dropped
+                // during the permission prompt): close whatever was opened for this connection id.
+                skapi.closeRTC({ cid }).catch(() => { });
+                throw err;
+            } finally {
+                placingCall = false;
+            }
 
             let dialog = document.getElementById("el_dl_calling");
             if (!dialog.open) {
@@ -592,23 +619,41 @@
         }
 
         async function acceptIncomingCall() {
-            if (!receiver) {
+            // accepting guards against a second click while the browser asks for the camera.
+            if (!receiver || accepting) {
                 return;
             }
+            accepting = true;
             try {
                 rtcConnection = await receiver.connectRTC({ media: { audio: true, video: true } }, RTCCallback);
                 document.getElementById("el_dl_incoming").close();
                 showLocalMedia();
             } catch (err) {
                 alert(err.message);
+            } finally {
+                accepting = false;
             }
         }
 
         function rejectIncomingCall() {
+            if (accepting) {
+                return;
+            }
             receiver?.hangup?.();
             document.getElementById("el_dl_incoming").close();
             receiver = null;
         }
+
+        // Escape closes a dialog on its own; here it cancels the outgoing call or rejects the incoming one,
+        // so a call never keeps ringing without its dialog.
+        document.getElementById("el_dl_calling").addEventListener("cancel", (event) => {
+            event.preventDefault();
+            hangupRTC();
+        });
+        document.getElementById("el_dl_incoming").addEventListener("cancel", (event) => {
+            event.preventDefault();
+            rejectIncomingCall();
+        });
 
         /*
             The list of users who can be called: everyone else in the realtime group "RTCCall".
@@ -679,8 +724,8 @@
 
             if (rt.type === "notice") {
                 if (["USER_LEFT", "USER_DISCONNECTED"].includes(rt.code)) {
+                    // One row per connection: the same user may still be online in another tab.
                     document.getElementById("el_tr_participant-" + rt.sender_cid)?.remove();
-                    delete participants[rt.sender];
                     delete cidList[rt.sender_cid];
                     if (!hasParticipantRows()) {
                         showParticipantMessage("No other user is online.");
@@ -696,9 +741,30 @@
                 receiver = null;
             }
 
+            if (rt.type === "reconnect") {
+                // The realtime connection dropped. The SDK reopens it and joins the group again by itself.
+                online = false;
+            }
+
+            if (rt.type === "success" && !online) {
+                /*
+                    The realtime connection is open again. Users may have come and gone meanwhile, and
+                    connection ids change on a reconnect, so the list is read again.
+                */
+                online = true;
+                cidList = {};
+                showParticipantMessage("Loading...");
+                getRealtimeUsers().catch((err) => console.error(err));
+            }
+
             if (rt.type === "rtc:incoming") {
                 // Someone is calling. The message object is used to accept (connectRTC) or reject (hangup) the call.
                 // rt.meta is what the caller passed as `meta`; rt.sources names what the caller sends.
+                if (placingCall || call || rtcConnection || receiver) {
+                    // Already in a call, or calling someone: reject this one as busy.
+                    rt.hangup();
+                    return;
+                }
                 receiver = rt;
                 setPeer(participants[rt.sender]);
                 document.getElementById("incomingKind").textContent = rt.meta?.kind || "call";
