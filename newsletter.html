@@ -24,8 +24,16 @@
         <h1>Newsletter</h1>
         <p>
             Visitors can subscribe to your newsletter without an account. <code>skapi.subscribeNewsletter()</code>
-            takes the email address and the newsletter group. The group <code>public</code> is the newsletter for
-            everyone; you write and send the newsletters from your project's page at www.skapi.com.
+            takes the email address and the newsletter group, and sends a confirmation email: the address is on the
+            list once the link in it is clicked. The group <code>public</code> is the newsletter for everyone.
+        </p>
+        <p>
+            A logged in user subscribes with their account's email address instead, which must be verified, and gets
+            no confirmation email. A guest account cannot subscribe.
+        </p>
+        <p>
+            To send a newsletter, write it in your own mail app and send it from your project's email address to the
+            list's sending address, shown on the Newsletters page of your project at www.skapi.com.
         </p>
         <p>
             The form below is passed straight to the method: the <code>name</code> of each field is the name of the
@@ -33,10 +41,11 @@
         </p>
 
         <form onsubmit="subscribeToNewsletter(event)">
-            <label>
+            <label id="emailField">
                 Email address
                 <input type="email" name="email" placeholder="your@email.com" required>
             </label>
+            <p id="accountNote" hidden></p>
             <input type="hidden" name="group" value="public">
             <button type="submit">Subscribe</button>
         </form>
@@ -44,6 +53,26 @@
     </main>
 
     <script>
+        /*
+            The page works without an account, but service.js logs a returning user in automatically.
+            A logged in user subscribes with the account's email address, so the email field is taken out;
+            a guest account cannot subscribe at all.
+        */
+        userReady.then((user) => {
+            if (!user) {
+                return;
+            }
+            let note = document.getElementById("accountNote");
+            note.hidden = false;
+            document.getElementById("emailField").remove();
+            if (user.anonymous) {
+                note.textContent = "You are logged in as a guest, and a guest account cannot subscribe. Log out to subscribe with an email address.";
+                document.querySelector("form button[type=submit]").disabled = true;
+            } else {
+                note.textContent = `You are logged in: your account's email address (${user.email}) is subscribed. It must be verified.`;
+            }
+        });
+
         async function subscribeToNewsletter(event) {
             event.preventDefault();
             let form = event.target;

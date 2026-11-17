@@ -9,7 +9,7 @@ The same pages are described, with screenshots, under [Full Examples](https://do
 | Page | What it demonstrates |
 | --- | --- |
 | `index.html` | The menu: one entry per feature page. |
-| `account.html` | The hub of the account pages below, with a **Continue as a guest** button: `anonymousLogin()` signs a visitor in with a temporary account that is deleted 30 minutes after they leave. |
+| `account.html` | The hub of the account pages below. It and `login.html` have a **Continue as a guest** button: `anonymousLogin()` signs a visitor in with a temporary account that is deleted 30 minutes after they leave. |
 | `signup.html`, `signup-success.html`, `login.html`, `email-verification.html`, `forgot-password.html`, `reset-password.html`, `change-password.html`, `update-profile.html`, `remove-account.html`, `recover-account.html` | Sign up, log in, verify an email address, reset or change a password, update a profile, remove and recover an account. |
 | `newsletter.html` | Let visitors subscribe to your newsletter with their email address. |
 | `inquiry.html` | A contact form that sends a message to you, the project owner. |
@@ -31,7 +31,7 @@ npm run dev
 
 Then open `http://localhost:4000/index.html?pid=<Project ID>`. `npm run dev` starts a small static server on port 4000; any other static server works the same way.
 
-The files also open straight from the file system, except `webrtc.html` and `drawing.html`: the browser only allows the camera, the microphone, the screen and WebRTC on HTTPS or on `localhost`.
+The files also open straight from the file system, except `webrtc.html` and `drawing.html`: the browser only allows the camera, the microphone, the screen and WebRTC on HTTPS or on `localhost`. The links in the signup confirmation and account recovery emails also need the pages served over HTTP(S), since an email link cannot open a file on your computer.
 
 Pages that need a logged-in user (`database.html`, `realtime.html`, `webrtc.html`, `drawing.html` and the account pages that change an account) send you to `login.html` first and bring you back afterwards. `newsletter.html` and `inquiry.html` work without an account.
 

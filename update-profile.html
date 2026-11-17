@@ -30,7 +30,8 @@
         </p>
         <p>
             The email address can only be made public once it is verified.
-            Changing the email address makes it unverified again.
+            Changing the email address makes it unverified again, and the new address cannot be used to log in
+            until it is verified; until then the user logs in with the address they signed up with.
         </p>
 
         <!-- This page needs a logged in user (see LOGIN_REQUIRED in service.js). -->
@@ -79,6 +80,9 @@
         });
 
         async function updateProfile(event) {
+            // Skapi stops the browser's own submit as well; doing it first also keeps the fields out of the URL
+            // if the Skapi script failed to load.
+            event.preventDefault();
             try {
                 // On success Skapi redirects to the form's action (account.html).
                 await skapi.updateProfile(event);

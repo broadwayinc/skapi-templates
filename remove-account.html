@@ -28,8 +28,8 @@
         </p>
         <p>
             The account is disabled, not deleted right away. Within 90 days it can be recovered by logging in with a
-            verified email address (see <a href="recover-account.html">Recover account</a>). After 6 months the
-            account and its data are deleted for good. An account without a verified email address cannot be recovered.
+            verified email address (see <a href="recover-account.html">Recover account</a>). After 90 days the
+            account's data is deleted for good. An account without a verified email address cannot be recovered.
         </p>
 
         <!-- This page needs a logged in user (see LOGIN_REQUIRED in service.js). -->
@@ -44,11 +44,17 @@
             if (!confirm("Remove your account?")) {
                 return;
             }
+            /*
+                disableAccount() logs the user out. leavingOnPurpose (service.js) keeps the logout from sending
+                the user to the login page, so the page can say the account was removed and go home.
+            */
+            leavingOnPurpose = true;
             try {
                 await skapi.disableAccount();
                 alert("Your account has been removed.");
                 location.href = pageUrl("index.html");
             } catch (err) {
+                leavingOnPurpose = false;
                 alert(err.message);
             }
         }

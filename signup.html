@@ -55,14 +55,20 @@
     </main>
 
     <script>
-        // A user who is already logged in does not need to sign up.
+        /*
+            A user who is already logged in does not need to sign up.
+            A guest can: signup() logs the guest out first, which deletes the temporary account.
+        */
         userReady.then((user) => {
-            if (user) {
+            if (user && !user.anonymous) {
                 location.replace(pageUrl("account.html"));
             }
         });
 
         async function signup(event) {
+            // Skapi stops the browser's own submit as well; doing it first also keeps the fields out of the URL
+            // if the Skapi script failed to load.
+            event.preventDefault();
             try {
                 // On success Skapi redirects to the form's action (signup-success.html).
                 await skapi.signup(event, { signup_confirmation: pageUrl("login.html") });

@@ -91,23 +91,52 @@ function goToLogin() {
 }
 
 /*
+    Pages a guest cannot use.
+    A guest (a temporary account made with skapi.anonymousLogin()) cannot edit its profile, change a password,
+    verify an email address or remove itself, so a guest who opens one of these pages is sent to the account page.
+*/
+const NOT_FOR_GUESTS = [
+    "update-profile.html",
+    "change-password.html",
+    "email-verification.html",
+    "remove-account.html",
+];
+
+/*
+    A page that logs the user out on purpose (remove-account.html) sets this first,
+    so the user is not sent to the login page while the page is still finishing.
+*/
+let leavingOnPurpose = false;
+
+/*
     The options object is passed to the Skapi constructor.
     - autoLogin: when true, a user who logged in before is logged in again automatically.
-    - eventListener.onLogin: called with the user's profile when the user logs in or the session is updated,
-      and with null when the user logs out.
+    - eventListener.onLogin: called when the page loads, with the restored user's profile or null,
+      then on every login (with the profile) and logout (with null), and with null when the session ends on its own.
 */
 let options = {
     autoLogin: true,
     eventListener: {
         onLogin: (user) => {
-            if (!user && LOGIN_REQUIRED.includes(currentPage())) {
+            if (!user && !leavingOnPurpose && LOGIN_REQUIRED.includes(currentPage())) {
                 goToLogin();
             }
         },
     },
 };
 
-const skapi = new Skapi(PROJECT_ID, options);
+let skapi;
+try {
+    skapi = new Skapi(PROJECT_ID, options);
+} catch (err) {
+    /*
+        A project id that is not valid (a typo in ?pid=, for example) makes the constructor throw.
+        It is forgotten, so the next page load does not keep failing with it.
+    */
+    sessionStorage.removeItem("skapi:project_id");
+    alert("The project id is not valid: " + err.message);
+    throw err;
+}
 
 /*
     userReady resolves once the automatic login has been tried.
@@ -117,6 +146,9 @@ const skapi = new Skapi(PROJECT_ID, options);
 const userReady = skapi.getProfile().then((user) => {
     if (!user && LOGIN_REQUIRED.includes(currentPage())) {
         goToLogin();
+    } else if (user?.anonymous && NOT_FOR_GUESTS.includes(currentPage())) {
+        alert("A guest account cannot use this page. Sign up or log in with an account to use it.");
+        location.replace(pageUrl("account.html"));
     }
     return user;
 }).catch((err) => {

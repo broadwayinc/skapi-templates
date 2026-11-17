@@ -49,8 +49,9 @@
         <p>
             <code>skapi.anonymousLogin()</code> signs the visitor in without an account of their own.
             It creates a temporary account with no email address and no password, which is deleted 30 minutes after
-            the visitor leaves, or at once on logout. The project owner turns this on with
-            <strong>Anonymous Login</strong> in the project settings.
+            the visitor leaves, or at once on logout. A guest who logs in or signs up afterwards leaves the
+            temporary account behind. <strong>Anonymous Login</strong> is on for projects created at
+            www.skapi.com; the project owner can turn it off in the project settings.
         </p>
         <p>
             <button type="button" id="guestLoginButton" onclick="guestLogin()">Continue as a guest</button>
@@ -70,14 +71,17 @@
         }
         document.getElementById("loginForm").action = pageUrl(destination);
 
-        // A user who is already logged in is sent on right away.
+        // A user who is already logged in is sent on right away. A guest stays, to log in with a real account.
         userReady.then((user) => {
-            if (user) {
+            if (user && !user.anonymous) {
                 location.replace(pageUrl(destination));
             }
         });
 
         async function login(event) {
+            // Skapi stops the browser's own submit as well; doing it first also keeps the fields out of the URL
+            // if the Skapi script failed to load.
+            event.preventDefault();
             try {
                 // On success Skapi redirects to the form's action.
                 await skapi.login(event);
@@ -98,16 +102,29 @@
                     }
                     return;
                 }
+                if (err.code === "SIGNUP_CONFIRMATION_NEEDED") {
+                    /*
+                        The account was made with a signup confirmation (see signup.html) and its link was not clicked yet.
+                        skapi.resendSignupConfirmation() sends the email again, to the account that just failed to log in.
+                    */
+                    if (confirm("Confirm your email address first, with the link in the signup email. Send the email again?")) {
+                        try {
+                            await skapi.resendSignupConfirmation();
+                            alert("The confirmation email has been sent again.");
+                        } catch (resendErr) {
+                            alert(resendErr.message);
+                        }
+                    }
+                    return;
+                }
                 alert(err.message);
             }
         }
 
         /*
-            A guest account cannot edit its profile, change a password, verify an email address or remove itself,
-            so a guest who was sent here from one of those pages goes to the account page instead.
+            A guest goes where a login would go, except to the pages a guest cannot use
+            (NOT_FOR_GUESTS in service.js): from those, to the account page instead.
         */
-        const NOT_FOR_GUESTS = ["update-profile.html", "change-password.html", "email-verification.html", "remove-account.html"];
-
         async function guestLogin() {
             let button = document.getElementById("guestLoginButton");
             button.disabled = true;
@@ -118,7 +135,7 @@
             } catch (err) {
                 /*
                     err.message tells why, for example
-                    "Anonymous login is not enabled for this project." when the project owner has not turned it on,
+                    "Anonymous login is not enabled for this project." when the project owner has turned it off,
                     or "User limit exceeded." when the project is at its plan's user limit.
                 */
                 alert(err.message);

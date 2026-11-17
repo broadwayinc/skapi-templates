@@ -77,6 +77,9 @@
         }
 
         async function verifyCode(event) {
+            // Skapi stops the browser's own submit as well; doing it first also keeps the fields out of the URL
+            // if the Skapi script failed to load.
+            event.preventDefault();
             try {
                 // With the form, verifyEmail() checks the code. On success Skapi redirects to the form's action.
                 await skapi.verifyEmail(event);
